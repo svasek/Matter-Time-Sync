@@ -16,7 +16,7 @@ It communicates directly with the Matter Server Add-on (or standalone container)
     *   Time Zone (Standard Offset)
     *   UTC Time (Microsecond precision)
 
----
+⚠️ You have to expose the TCP port 5580. To do so go to `Settings` → `Add-ons` → `Matter Server` → `Configuration` → `Network` and add 5580 to expose the Matter Server WebSocket port.
 
 ## 📥 Installation
 

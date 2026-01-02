@@ -22,6 +22,8 @@ It communicates directly with the Matter Server Add-on (or standalone container)
 
 ### Option 1: HACS (Recommended)
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Loweack&repository=Matter-Time-Sync&category=integration)
+
 1.  Open **HACS** in Home Assistant.
 2.  Go to the **Integrations** section.
 3.  Click the menu (three dots) in the top right corner and select **Custom repositories**.

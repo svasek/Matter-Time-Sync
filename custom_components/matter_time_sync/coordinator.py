@@ -269,39 +269,23 @@ class MatterTimeSyncCoordinator:
         now = datetime.now(tz)
         utc_now = datetime.now(ZoneInfo("UTC"))
         
-        # UTC offset in seconds
+        # UTC offset in seconds (e.g., 3600 for UTC+1)
         utc_offset = int(now.utcoffset().total_seconds())
+        
+        # Check for DST offset
+        dst_offset = 0
+        if now.dst() is not None:
+            dst_offset = int(now.dst().total_seconds())
         
         # UTC time in microseconds since epoch
         utc_microseconds = int(utc_now.timestamp() * 1_000_000)
         
-        _LOGGER.debug(
-            "Syncing time for node %s: %s (UTC offset: %s seconds)",
-            node_id, now.isoformat(), utc_offset
+        _LOGGER.info(
+            "Syncing time for node %s: local=%s, UTC=%s, offset=%ds, DST=%ds",
+            node_id, now.isoformat(), utc_now.isoformat(), utc_offset, dst_offset
         )
         
-        # 1. Set Timezone
-        tz_response = await self._async_send_command(
-            "device_command",
-            {
-                "node_id": node_id,
-                "endpoint_id": endpoint,
-                "cluster_id": TIME_SYNC_CLUSTER_ID,
-                "command_name": "SetTimeZone",
-                "payload": {
-                    "timeZone": [{
-                        "offset": utc_offset,
-                        "validAt": 0,
-                    }]
-                }
-            }
-        )
-        
-        if not tz_response:
-            _LOGGER.error("Failed to set timezone for node %s", node_id)
-            # Continue anyway, try to set time
-        
-        # 2. Set UTC Time
+        # 1. Set UTC Time FIRST (most important)
         time_response = await self._async_send_command(
             "device_command",
             {
@@ -316,15 +300,86 @@ class MatterTimeSyncCoordinator:
             }
         )
         
-        if time_response:
-            _LOGGER.info(
-                "Time synced for node %s: %s (UTC offset: %s)",
-                node_id, now.isoformat(), utc_offset
-            )
-            return True
+        if not time_response:
+            _LOGGER.error("Failed to set UTC time for node %s", node_id)
+            return False
         
-        _LOGGER.error("Failed to set UTC time for node %s", node_id)
-        return False
+        _LOGGER.debug("SetUTCTime successful for node %s", node_id)
+        
+        # 2. Set Timezone
+        tz_response = await self._async_send_command(
+            "device_command",
+            {
+                "node_id": node_id,
+                "endpoint_id": endpoint,
+                "cluster_id": TIME_SYNC_CLUSTER_ID,
+                "command_name": "SetTimeZone",
+                "payload": {
+                    "timeZone": [{
+                        "offset": utc_offset,
+                        "validAt": 0,
+                        "name": self._timezone,
+                    }]
+                }
+            }
+        )
+        
+        if tz_response:
+            _LOGGER.debug("SetTimeZone successful for node %s (offset=%d)", node_id, utc_offset)
+        else:
+            _LOGGER.warning("SetTimeZone failed for node %s, trying without name", node_id)
+            # Try without name (some devices don't support it)
+            tz_response = await self._async_send_command(
+                "device_command",
+                {
+                    "node_id": node_id,
+                    "endpoint_id": endpoint,
+                    "cluster_id": TIME_SYNC_CLUSTER_ID,
+                    "command_name": "SetTimeZone",
+                    "payload": {
+                        "timeZone": [{
+                            "offset": utc_offset,
+                            "validAt": 0,
+                        }]
+                    }
+                }
+            )
+            if tz_response:
+                _LOGGER.debug("SetTimeZone (without name) successful for node %s", node_id)
+            else:
+                _LOGGER.warning("SetTimeZone completely failed for node %s", node_id)
+        
+        # 3. Set DST Offset (optional, some devices don't support it)
+        # Use a far-future timestamp for validUntil instead of 0
+        far_future_us = int((utc_now.timestamp() + 365 * 24 * 3600) * 1_000_000)  # 1 year from now
+        
+        dst_response = await self._async_send_command(
+            "device_command",
+            {
+                "node_id": node_id,
+                "endpoint_id": endpoint,
+                "cluster_id": TIME_SYNC_CLUSTER_ID,
+                "command_name": "SetDSTOffset",
+                "payload": {
+                    "DSTOffset": [{
+                        "offset": dst_offset,
+                        "validStarting": 0,
+                        "validUntil": far_future_us,
+                    }]
+                }
+            }
+        )
+        
+        if dst_response:
+            _LOGGER.debug("SetDSTOffset successful for node %s (DST=%d)", node_id, dst_offset)
+        else:
+            _LOGGER.debug("SetDSTOffset not supported or failed for node %s (this is often OK)", node_id)
+        
+        _LOGGER.info(
+            "Time synced for node %s: %s (UTC offset: %d, DST: %d)",
+            node_id, now.isoformat(), utc_offset, dst_offset
+        )
+        return True
 
     def update_config(self, ws_url: str, timezone: str) -> None:
         """Update configuration (called when options change)."""

@@ -103,3 +103,158 @@ service: matter_time_sync.sync_time
 data:
   node_id: 7
   endpoint: 0
+```
+
+#### `matter_time_sync.sync_all`
+
+Synchronize time on all filtered Matter devices at once.
+
+```yaml
+service: matter_time_sync.sync_all
+```
+
+#### `matter_time_sync.refresh_devices`
+
+Search for new Matter devices and create buttons for them (useful after adding new devices).
+
+```yaml
+service: matter_time_sync.refresh_devices
+```
+
+### Automation Examples
+
+#### Sync IKEA ALPSTUGA on Schedule and Device Availability
+
+Synchronizes time every Sunday at 03:15 AM and when the device comes online:
+
+```yaml
+alias: "[TIME] Sync IKEA ALPSTUGA"
+description: >-
+  Synchronizes the time on the IKEA ALPSTUGA on Sundays at 03:15 AM and whenever
+  the device becomes available after being unavailable.
+triggers:
+  - at: "03:15:00"
+    trigger: time
+    weekday:
+      - sun
+  - entity_id:
+      - switch.alpstuga_air_quality_monitor
+    from:
+      - unavailable
+    to: null
+    trigger: state
+actions:
+  - delay:
+      hours: 0
+      minutes: 0
+      seconds: 5
+      milliseconds: 0
+  - action: matter_time_sync.sync_time
+    data:
+      node_id: 7
+      endpoint: 0
+mode: restart
+```
+
+#### Sync All Devices at Midnight
+
+```yaml
+automation:
+  - alias: "Sync Matter Time at Midnight"
+    trigger:
+      - platform: time
+        at: "00:00:00"
+    action:
+      - service: matter_time_sync.sync_all
+```
+
+#### Sync After Home Assistant Restart
+
+```yaml
+automation:
+  - alias: "Sync Matter Time on Startup"
+    trigger:
+      - platform: homeassistant
+        event: start
+    action:
+      - delay: "00:01:00"  # Wait for Matter Server to be ready
+      - service: matter_time_sync.sync_all
+```
+
+---
+
+## 🔧 Device Compatibility
+
+The integration automatically detects which devices support the Time Synchronization cluster (0x0038). Devices that are known to support it include:
+
+- **IKEA ALPSTUGA** air quality monitor
+- **IKEA VINDSTYRKA** air quality sensor
+- Other Matter devices with Time Sync cluster support
+
+Devices without Time Sync support (like simple sensors, buttons, or plugs) will be skipped unless you disable the "Only devices with Time Sync support" option.
+
+---
+
+## 🐛 Troubleshooting
+
+### No devices found
+
+- Check that the Matter Server is running and accessible
+- Verify the WebSocket URL is correct (default: `ws://core-matter-server:5580/ws`)
+- Check Home Assistant logs for connection errors
+
+### Devices showing as "Matter Node X"
+
+- The device may not expose product information
+- Check if the device has a user-defined name in Home Assistant
+- The name will update after the device is properly commissioned
+
+### Sync fails with "UnsupportedCluster"
+
+- The device does not support the Time Synchronization cluster
+- Enable "Only devices with Time Sync support" to filter these out automatically
+
+### Sync fails with "Node X is not (yet) available"
+
+- The device is offline or not responding
+- Check the device's battery or power connection
+- Try re-commissioning the device in the Matter integration
+
+---
+
+## 📝 Logging
+
+Enable debug logging for detailed information:
+
+```yaml
+logger:
+  default: info
+  logs:
+    custom_components.matter_time_sync: debug
+```
+
+---
+
+## 📋 Version History
+
+### v2.0.0
+- Added automatic device discovery during auto-sync
+- Added Time Sync cluster detection
+- Added device filter option
+- Added "Only Time Sync devices" option
+- Added button entities for each device
+- Added refresh_devices service
+- Added sync_all service
+- Added timezone selection dropdown
+- Added configurable auto-sync intervals (15 min to 24 hours)
+- Added complete German and English translations
+- Fixed device naming (unique entity names)
+- Fixed attribute parsing for Matter Server
+
+### v1.0.4
+- Initial stable release
+- Basic time synchronization via service calls
+- WebSocket communication with Matter Server
+- UI configuration support
+
+---

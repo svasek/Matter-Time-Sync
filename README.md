@@ -160,26 +160,24 @@ mode: restart
 #### Sync All Devices at Midnight
 
 ```yaml
-automation:
-  - alias: "Sync Matter Time at Midnight"
-    trigger:
-      - platform: time
-        at: "00:00:00"
-    action:
-      - service: matter_time_sync.sync_all
+alias: "Sync Matter Time at Midnight"
+trigger:
+  - platform: time
+    at: "00:00:00"
+action:
+  - service: matter_time_sync.sync_all
 ```
 
 #### Sync After Home Assistant Restart
 
 ```yaml
-automation:
-  - alias: "Sync Matter Time on Startup"
-    trigger:
-      - platform: homeassistant
-        event: start
-    action:
-      - delay: "00:01:00"  # Wait for Matter Server to be ready
-      - service: matter_time_sync.sync_all
+alias: "Sync Matter Time on Startup"
+trigger:
+  - platform: homeassistant
+    event: start
+action:
+  - delay: "00:01:00"  # Wait for Matter Server to be ready
+  - service: matter_time_sync.sync_all
 ```
 
 ---

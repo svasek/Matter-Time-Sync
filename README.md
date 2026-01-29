@@ -10,6 +10,11 @@ This component communicates directly with the Matter Server Add-on (or standalon
 ## 🙏🏻 Acknowledgments
 🫰🏻 A big "thank you" to [@Lexorius](https://github.com/Lexorius) and [@miketth](https://github.com/miketth) for their help with this v2.
 
+## ⚠️ WARNING
+### Breaking Change in v2.0
+By upgrading to v2.0, you must delete your current entry in **Settings > Devices & Services > Matter Time Sync** and add it again.
+This is required to load the new configuration options properly.
+
 ## ✨ Features
 
 *   **🔍 Automatic Device Discovery**: Discovers all Matter devices from your Matter Server and identifies which support time synchronization

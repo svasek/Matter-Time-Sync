@@ -273,8 +273,10 @@ class MatterTimeSyncCoordinator:
         # DST offset in seconds (0 when not in DST)
         dst_offset = int(now.dst().total_seconds()) if now.dst() else 0
 
-        # Base timezone offset (excluding DST) to avoid double-counting DST
-        utc_offset = total_offset - dst_offset
+        # SOLUTION 1: Use full total_offset for SetTimeZone. 
+        # This ensures the device gets the correct wall-clock time offset 
+        # even if it ignores the separate SetDSTOffset command.
+        utc_offset = total_offset
 
         # UTC time in microseconds since epoch
         utc_microseconds = int(utc_now.timestamp() * 1_000_000)
@@ -308,6 +310,8 @@ class MatterTimeSyncCoordinator:
             return False
 
         _LOGGER.debug("SetUTCTime successful for node %s", node_id)
+
+        await asyncio.sleep(1.0)
 
         # 2. Set Timezone
         tz_response = await self._async_send_command(
@@ -361,6 +365,8 @@ class MatterTimeSyncCoordinator:
                 )
             else:
                 _LOGGER.warning("SetTimeZone completely failed for node %s", node_id)
+
+        await asyncio.sleep(1.0)
 
         # 3. Set DST Offset (optional, some devices don't support it)
         # Use a far-future timestamp for validUntil instead of 0

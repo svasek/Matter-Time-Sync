@@ -360,7 +360,7 @@ class MatterTimeSyncCoordinator:
             _LOGGER.debug("SetUTCTime successful for node %s", node_id)
 
             # DELAY 1: Allow device to process UTC time update
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.0)
 
             # ---------------------------------------------------------
             # 2. Set Timezone
@@ -420,7 +420,7 @@ class MatterTimeSyncCoordinator:
                     _LOGGER.warning("SetTimeZone completely failed for node %s", node_id)
 
             # DELAY 2: Allow device to process TimeZone update
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.0)
 
             # ---------------------------------------------------------
             # 3. Set DST Offset (Try PascalCase first, then camelCase)

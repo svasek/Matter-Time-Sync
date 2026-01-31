@@ -9,6 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import aiohttp
+from aiohttp import WSMsgType
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import device_registry as dr
@@ -35,9 +36,10 @@ class MatterTimeSyncCoordinator:
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._message_id = 0
-        self._nodes_cache: list[dict] = []
+        self._nodes_cache: list[dict[str, Any]] = []
         self._connected = False
         self._lock = asyncio.Lock()
+        self._command_lock = asyncio.Lock()  # Prevent concurrent WS reads
 
     @property
     def is_connected(self) -> bool:
@@ -60,67 +62,82 @@ class MatterTimeSyncCoordinator:
                 return True
             except Exception as err:
                 _LOGGER.error("Failed to connect to Matter Server: %s", err)
-                self._connected = False
-                if self._session:
-                    await self._session.close()
-                    self._session = None
+                await self._cleanup_connection()
                 return False
+
+    async def _cleanup_connection(self) -> None:
+        """Close and cleanup websocket + session."""
+        self._connected = False
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
+        if self._session:
+            await self._session.close()
+            self._session = None
 
     async def async_disconnect(self) -> None:
         """Disconnect from Matter Server."""
         async with self._lock:
-            self._connected = False
-            if self._ws:
-                await self._ws.close()
-                self._ws = None
-            if self._session:
-                await self._session.close()
-                self._session = None
+            await self._cleanup_connection()
 
     async def _async_send_command(
         self, command: str, args: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
         """Send a command to the Matter Server and wait for response."""
-        if not self.is_connected:
-            if not await self.async_connect():
-                return None
+        # Only allow one in-flight command at a time.
+        # Without this, multiple coroutines would read from the same websocket
+        # and responses could be delivered to the wrong caller.
+        async with self._command_lock:
+            if not self.is_connected:
+                if not await self.async_connect():
+                    return None
 
-        self._message_id += 1
-        message_id = str(self._message_id)
+            self._message_id += 1
+            message_id = str(self._message_id)
 
-        request = {
-            "message_id": message_id,
-            "command": command,
-        }
-        if args:
-            request["args"] = args
+            request = {
+                "message_id": message_id,
+                "command": command,
+            }
+            if args:
+                request["args"] = args
 
-        try:
-            await self._ws.send_json(request)
+            try:
+                await self._ws.send_json(request)
 
-            # Wait for response with matching message_id
-            async for msg in self._ws:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    data = json.loads(msg.data)
-                    if data.get("message_id") == message_id:
-                        if "error_code" in data:
-                            _LOGGER.error(
-                                "Matter Server error: %s",
-                                data.get("details", "Unknown error"),
-                            )
+                # Wait for response with matching message_id
+                async def _wait_for_response():
+                    async for msg in self._ws:
+                        if msg.type == WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if data.get("message_id") == message_id:
+                                if "error_code" in data:
+                                    # Log warning instead of error to avoid noise during fallbacks
+                                    _LOGGER.debug(
+                                        "Matter Server error for command %s: %s",
+                                        command,
+                                        data.get("details", "Unknown error"),
+                                    )
+                                    return None
+                                return data
+                        elif msg.type == WSMsgType.ERROR:
+                            _LOGGER.error("WebSocket error: %s", msg.data)
                             return None
-                        return data
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    _LOGGER.error("WebSocket error: %s", msg.data)
-                    break
-                elif msg.type == aiohttp.WSMsgType.CLOSED:
-                    _LOGGER.warning("WebSocket closed unexpectedly")
-                    self._connected = False
-                    break
-        except Exception as err:
-            _LOGGER.error("Error sending command to Matter Server: %s", err)
-            self._connected = False
-            return None
+                        elif msg.type == WSMsgType.CLOSED:
+                            _LOGGER.warning("WebSocket closed unexpectedly")
+                            await self._cleanup_connection()
+                            return None
+
+                # IMPORTANT: timeout prevents deadlock if server never responds
+                return await asyncio.wait_for(_wait_for_response(), timeout=10)
+
+            except asyncio.TimeoutError:
+                _LOGGER.error("Timeout waiting for response to %s", command)
+                return None
+            except Exception as err:
+                _LOGGER.error("Error sending command to Matter Server: %s", err)
+                await self._cleanup_connection()
+                return None
 
     def _get_ha_device_name(self, node_id: int) -> str | None:
         """
@@ -159,9 +176,9 @@ class MatterTimeSyncCoordinator:
                                 return device.name
         except Exception as err:
             _LOGGER.debug("Could not get HA device name: %s", err)
-            return None
+        return None
 
-    async def async_get_matter_nodes(self) -> list[dict]:
+    async def async_get_matter_nodes(self) -> list[dict[str, Any]]:
         """Get all Matter nodes from the server."""
         response = await self._async_send_command("get_nodes")
         if not response:
@@ -171,7 +188,7 @@ class MatterTimeSyncCoordinator:
         self._nodes_cache = self._parse_nodes(raw_nodes)
         return self._nodes_cache
 
-    def _parse_nodes(self, raw_nodes: list) -> list[dict]:
+    def _parse_nodes(self, raw_nodes: list) -> list[dict[str, Any]]:
         """Parse raw node data into usable format."""
         parsed = []
         for node in raw_nodes:
@@ -265,7 +282,7 @@ class MatterTimeSyncCoordinator:
             tz = ZoneInfo("UTC")
 
         now = datetime.now(tz)
-        utc_now = datetime.now(ZoneInfo("UTC"))
+        utc_now = now.astimezone(ZoneInfo("UTC"))
 
         # Total UTC offset in seconds (includes DST when applicable)
         total_offset = int(now.utcoffset().total_seconds()) if now.utcoffset() else 0
@@ -289,7 +306,21 @@ class MatterTimeSyncCoordinator:
             dst_offset,
         )
 
-        # 1. Set UTC Time FIRST (most important)
+        # ---------------------------------------------------------
+        # 1. Set UTC Time (Try PascalCase first, then camelCase)
+        # ---------------------------------------------------------
+
+        # Payload variants
+        payload_utc_pascal = {
+            "UTCTime": utc_microseconds,
+            "granularity": 3,
+        }
+        payload_utc_camel = {
+            "utcTime": utc_microseconds,
+            "granularity": 3,
+        }
+
+        # Attempt 1: Try PascalCase (Old Standard)
         time_response = await self._async_send_command(
             "device_command",
             {
@@ -297,15 +328,26 @@ class MatterTimeSyncCoordinator:
                 "endpoint_id": endpoint,
                 "cluster_id": TIME_SYNC_CLUSTER_ID,
                 "command_name": "SetUTCTime",
-                "payload": {
-                    "UTCTime": utc_microseconds,
-                    "granularity": 3,
-                },
+                "payload": payload_utc_pascal,
             },
         )
 
+        # Attempt 2: If failed, try camelCase (New Standard)
         if not time_response:
-            _LOGGER.error("Failed to set UTC time for node %s", node_id)
+            _LOGGER.debug("SetUTCTime (PascalCase) failed, trying camelCase...")
+            time_response = await self._async_send_command(
+                "device_command",
+                {
+                    "node_id": node_id,
+                    "endpoint_id": endpoint,
+                    "cluster_id": TIME_SYNC_CLUSTER_ID,
+                    "command_name": "SetUTCTime",
+                    "payload": payload_utc_camel,
+                },
+            )
+
+        if not time_response:
+            _LOGGER.error("Failed to set UTC time for node %s (tried both formats)", node_id)
             return False
 
         _LOGGER.debug("SetUTCTime successful for node %s", node_id)
@@ -313,8 +355,20 @@ class MatterTimeSyncCoordinator:
         # DELAY 1: Allow device to process UTC time update
         await asyncio.sleep(1.0)
 
+        # ---------------------------------------------------------
         # 2. Set Timezone
-        # We send the FULL offset (standard + DST) here, and tell the device the DST offset is 0 later.
+        # ---------------------------------------------------------
+
+        # 'timeZone' is commonly camelCase.
+        # We send the FULL offset (standard + DST) here.
+        tz_payload_list = [
+            {
+                "offset": utc_offset,
+                "validAt": 0,
+                "name": self._timezone,
+            }
+        ]
+
         tz_response = await self._async_send_command(
             "device_command",
             {
@@ -322,15 +376,7 @@ class MatterTimeSyncCoordinator:
                 "endpoint_id": endpoint,
                 "cluster_id": TIME_SYNC_CLUSTER_ID,
                 "command_name": "SetTimeZone",
-                "payload": {
-                    "timeZone": [
-                        {
-                            "offset": utc_offset,
-                            "validAt": 0,
-                            "name": self._timezone,
-                        }
-                    ]
-                },
+                "payload": {"timeZone": tz_payload_list},
             },
         )
 
@@ -343,6 +389,12 @@ class MatterTimeSyncCoordinator:
                 "SetTimeZone failed for node %s, trying without name", node_id
             )
             # Try without name (some devices don't support it)
+            tz_payload_list_no_name = [
+                {
+                    "offset": utc_offset,
+                    "validAt": 0,
+                }
+            ]
             tz_response = await self._async_send_command(
                 "device_command",
                 {
@@ -350,14 +402,7 @@ class MatterTimeSyncCoordinator:
                     "endpoint_id": endpoint,
                     "cluster_id": TIME_SYNC_CLUSTER_ID,
                     "command_name": "SetTimeZone",
-                    "payload": {
-                        "timeZone": [
-                            {
-                                "offset": utc_offset,
-                                "validAt": 0,
-                            }
-                        ]
-                    },
+                    "payload": {"timeZone": tz_payload_list_no_name},
                 },
             )
             if tz_response:
@@ -370,12 +415,27 @@ class MatterTimeSyncCoordinator:
         # DELAY 2: Allow device to process TimeZone update
         await asyncio.sleep(1.0)
 
-        # 3. Set DST Offset (forced to 0)
+        # ---------------------------------------------------------
+        # 3. Set DST Offset (Try PascalCase first, then camelCase)
+        # ---------------------------------------------------------
+
         # Use a far-future timestamp for validUntil instead of 0
         far_future_us = int(
             (utc_now.timestamp() + 365 * 24 * 3600) * 1_000_000
         )  # 1 year from now
-        
+
+        dst_list = [
+            {
+                "offset": dst_offset,  # Always 0
+                "validStarting": 0,
+                "validUntil": far_future_us,
+            }
+        ]
+
+        payload_dst_pascal = {"DSTOffset": dst_list}
+        payload_dst_camel = {"dstOffset": dst_list}
+
+        # Attempt 1: Try PascalCase
         dst_response = await self._async_send_command(
             "device_command",
             {
@@ -383,17 +443,23 @@ class MatterTimeSyncCoordinator:
                 "endpoint_id": endpoint,
                 "cluster_id": TIME_SYNC_CLUSTER_ID,
                 "command_name": "SetDSTOffset",
-                "payload": {
-                    "DSTOffset": [
-                        {
-                            "offset": dst_offset,  # Always 0
-                            "validStarting": 0,
-                            "validUntil": far_future_us,
-                        }
-                    ]
-                },
+                "payload": payload_dst_pascal,
             },
         )
+
+        # Attempt 2: If failed, try camelCase
+        if not dst_response:
+            _LOGGER.debug("SetDSTOffset (PascalCase) failed, trying camelCase...")
+            dst_response = await self._async_send_command(
+                "device_command",
+                {
+                    "node_id": node_id,
+                    "endpoint_id": endpoint,
+                    "cluster_id": TIME_SYNC_CLUSTER_ID,
+                    "command_name": "SetDSTOffset",
+                    "payload": payload_dst_camel,
+                },
+            )
 
         if dst_response:
             _LOGGER.debug(
@@ -418,12 +484,16 @@ class MatterTimeSyncCoordinator:
         """Sync time on all filtered devices."""
         # Get latest nodes
         nodes = await self.async_get_matter_nodes()
-        
+
         # Get filters from config
         device_filters = self.entry.data.get("device_filter", "")
-        device_filters = device_filters.split(",") if device_filters else []
+        device_filters = [
+            t.strip().lower()
+            for t in device_filters.split(",")
+            if t.strip()
+        ]
         only_time_sync = self.entry.data.get("only_time_sync_devices", True)
-        
+
         count = 0
         for node in nodes:
             node_id = node.get("node_id")
@@ -437,19 +507,14 @@ class MatterTimeSyncCoordinator:
             # Apply Filter Logic
             # (Matches simpler logic often found in HA integrations)
             if device_filters:
-                match = False
-                for term in device_filters:
-                    if term.strip().lower() in node_name.lower():
-                        match = True
-                        break
-                if not match:
+                if not any(term in node_name.lower() for term in device_filters):
                     continue
 
             # Sync!
             _LOGGER.info("Auto-syncing node %s", node_id)
             await self.async_sync_time(node_id)
             count += 1
-            
+
         _LOGGER.info("Sync all completed. Synced %d devices.", count)
 
     def update_config(self, ws_url: str, timezone: str) -> None:

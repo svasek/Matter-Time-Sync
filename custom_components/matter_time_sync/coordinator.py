@@ -1,5 +1,4 @@
 """Coordinator for Matter Time Sync."""
-
 from __future__ import annotations
 
 import asyncio
@@ -94,7 +93,7 @@ class MatterTimeSyncCoordinator:
             await self._cleanup_connection()
 
     async def _async_send_command(
-        self, command: str, args: dict[str, Any] | None = None, retry: bool = True
+        self, command: str, args: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
         """Send a command to the Matter Server and wait for response."""
         # Only allow one in-flight command at a time.
@@ -146,18 +145,6 @@ class MatterTimeSyncCoordinator:
                 _LOGGER.error("Timeout waiting for response to %s", command)
                 return None
             except Exception as err:
-                # Check if it's a "closing transport" error - websocket was closed
-                err_str = str(err).lower()
-                if ("closing" in err_str or "closed" in err_str) and retry:
-                    _LOGGER.warning(
-                        "WebSocket connection lost, reconnecting and retrying command %s",
-                        command,
-                    )
-                    await self._cleanup_connection()
-                    if await self.async_connect():
-                        # Retry once without further retries
-                        return await self._async_send_command(command, args, retry=False)
-                
                 _LOGGER.error("Error sending command to Matter Server: %s", err)
                 await self._cleanup_connection()
                 return None
@@ -357,8 +344,10 @@ class MatterTimeSyncCoordinator:
             # ---------------------------------------------------------
             # 1) Set TimeZone FIRST
             # ---------------------------------------------------------
-            # Use camelCase format without name (for better device compatibility)
-            tz_list = [{"offset": utc_offset, "validAt": 0}]
+            tz_list_with_name = [
+                {"offset": utc_offset, "validAt": 0, "name": self._timezone}
+            ]
+            tz_list_no_name = [{"offset": utc_offset, "validAt": 0}]
 
             # Try spec-like key first, then common JSON key (hybrid)
             tz_response = await self._async_send_command(
@@ -368,9 +357,20 @@ class MatterTimeSyncCoordinator:
                     "endpoint_id": endpoint_id,
                     "cluster_id": TIME_SYNC_CLUSTER_ID,
                     "command_name": "SetTimeZone",
-                    "payload": {"timeZone": tz_list},
+                    "payload": {"TimeZone": tz_list_with_name},
                 },
             )
+            if not tz_response:
+                tz_response = await self._async_send_command(
+                    "device_command",
+                    {
+                        "node_id": node_id,
+                        "endpoint_id": endpoint_id,
+                        "cluster_id": TIME_SYNC_CLUSTER_ID,
+                        "command_name": "SetTimeZone",
+                        "payload": {"timeZone": tz_list_with_name},
+                    },
+                )
 
             if tz_response:
                 _LOGGER.debug(
@@ -378,8 +378,35 @@ class MatterTimeSyncCoordinator:
                 )
             else:
                 _LOGGER.warning(
-                    "SetTimeZone failed for node %s (continuing anyway)", node_id
+                    "SetTimeZone failed for node %s, trying without name", node_id
                 )
+
+                tz_response = await self._async_send_command(
+                    "device_command",
+                    {
+                        "node_id": node_id,
+                        "endpoint_id": endpoint_id,
+                        "cluster_id": TIME_SYNC_CLUSTER_ID,
+                        "command_name": "SetTimeZone",
+                        "payload": {"TimeZone": tz_list_no_name},
+                    },
+                )
+                if not tz_response:
+                    tz_response = await self._async_send_command(
+                        "device_command",
+                        {
+                            "node_id": node_id,
+                            "endpoint_id": endpoint_id,
+                            "cluster_id": TIME_SYNC_CLUSTER_ID,
+                            "command_name": "SetTimeZone",
+                            "payload": {"timeZone": tz_list_no_name},
+                        },
+                    )
+
+                if tz_response:
+                    _LOGGER.debug("SetTimeZone (without name) successful for node %s", node_id)
+                else:
+                    _LOGGER.warning("SetTimeZone completely failed for node %s", node_id)
 
             # ---------------------------------------------------------
             # 2) Set DST Offset SECOND (Try PascalCase first, then camelCase)
@@ -405,21 +432,42 @@ class MatterTimeSyncCoordinator:
                 },
             )
 
+            if not dst_response:
+                _LOGGER.debug("SetDSTOffset (PascalCase) failed, trying camelCase...")
+                dst_response = await self._async_send_command(
+                    "device_command",
+                    {
+                        "node_id": node_id,
+                        "endpoint_id": endpoint_id,
+                        "cluster_id": TIME_SYNC_CLUSTER_ID,
+                        "command_name": "SetDSTOffset",
+                        "payload": {"dstOffset": dst_list},
+                    },
+                )
+
             if dst_response:
-                _LOGGER.debug("SetDSTOffset successful for node %s", node_id)
+                _LOGGER.debug("SetDSTOffset (0) successful for node %s", node_id)
             else:
                 _LOGGER.debug(
-                    "SetDSTOffset not supported or failed for node %s (continuing anyway)",
+                    "SetDSTOffset not supported or failed for node %s (this is often OK)",
                     node_id,
                 )
 
             # ---------------------------------------------------------
-            # 3) Set UTC Time LAST
+            # 3) Set UTC Time LAST (Try PascalCase first, then camelCase)
             # ---------------------------------------------------------
-            # Use compatible format (used in v1.0.4) : PascalCase UTCTime with granularity 4 
-            payload_utc = {
+            # Some stacks/devices require TimeSource to be provided.
+            # Keep the existing mechanic (PascalCase first, then camelCase) while including TimeSource.
+            time_source = 1
+            payload_utc_pascal = {
                 "UTCTime": utc_microseconds,
-                "granularity": 4,
+                "granularity": 3,
+                "TimeSource": time_source,
+            }
+            payload_utc_camel = {
+                "utcTime": utc_microseconds,
+                "granularity": 3,
+                "timeSource": time_source,
             }
 
             time_response = await self._async_send_command(
@@ -429,12 +477,27 @@ class MatterTimeSyncCoordinator:
                     "endpoint_id": endpoint_id,
                     "cluster_id": TIME_SYNC_CLUSTER_ID,
                     "command_name": "SetUTCTime",
-                    "payload": payload_utc,
+                    "payload": payload_utc_pascal,
                 },
             )
 
             if not time_response:
-                _LOGGER.error("Failed to set UTC time for node %s", node_id)
+                _LOGGER.debug("SetUTCTime (PascalCase) failed, trying camelCase...")
+                time_response = await self._async_send_command(
+                    "device_command",
+                    {
+                        "node_id": node_id,
+                        "endpoint_id": endpoint_id,
+                        "cluster_id": TIME_SYNC_CLUSTER_ID,
+                        "command_name": "SetUTCTime",
+                        "payload": payload_utc_camel,
+                    },
+                )
+
+            if not time_response:
+                _LOGGER.error(
+                    "Failed to set UTC time for node %s (tried both formats)", node_id
+                )
                 return False
 
             _LOGGER.debug("SetUTCTime successful for node %s", node_id)
